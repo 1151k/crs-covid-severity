@@ -1,0 +1,654 @@
+---
+title: "Analysis pipeline"
+output: html_notebook
+---
+  
+## 1. Loading in of data
+  
+```{r}
+
+# load packages
+## data.table: manipulation of data
+## haven: load Stata files
+## summarytools: for crosstab (and other descriptive stats potentially)
+library(data.table)
+library(haven)
+library(summarytools)
+
+
+
+# load merged data (both specialist and primary care data)
+dt <- as.data.table(haven::read_dta("data/crs_merged_20260311.dta"))
+
+```
+
+## 2. Check missingness
+
+```{r}
+
+# load packages
+## data.table: manipulation of data
+library(data.table)
+## officer, flextable: descriptive tables (including export thereof)
+library(officer)
+library(flextable)
+
+
+
+# present level of missingness across the variables
+dt_missingness <- data.table(
+  variable = names(dt),
+  missing_pct = sapply(dt, function(x) mean(is.na(x)) * 100)
+)
+dt_missingness
+
+
+
+# save data.table produced above as a Word table
+## create a flextable, and make sure the font size is small enough to fit the table on the page
+ft <- flextable(dt_missingness) |>
+  flextable::fontsize(size = 9) |>
+  flextable::autofit()
+## create a section with landscape orientation for the table
+landscape_section <- prop_section(
+  page_size = page_size(orient = "landscape"),
+  type = "continuous"
+)
+## create a Word document, add the table to it, and set the section to landscape orientation
+doc <- read_docx()
+doc <- body_add_flextable(doc, ft)
+## save the document
+print(doc, target = "output/missingness.docx")
+
+```
+
+## 3. Removal of "inappropriate" participants, strangely formatted characters, and unnecessary variables
+
+```{r}
+
+# load packages
+## data.table: manipulation of data
+library(data.table)
+
+
+
+# remove "inappropriate" participants
+## remove those with missingness
+dt <- dt[!is.na(dt$education3_2019),]
+## remove those who emigrated pre-2020 and those who entered post-2020
+dt <- dt[dt$outbefore2020 != 1, ]
+dt <- dt[dt$inafter2020 != 1, ]
+
+
+
+# find variables with oddly coded å/ä/ö
+sapply(dt, function(x) {
+  if (is.factor(x) || is.character(x)) {
+    any(!validUTF8(as.character(x)))
+  } else {
+    FALSE
+  }
+})
+
+# replace oddly coded å/ä/ö
+dt$fodelselandgrupp[dt$fodelselandgrupp == "Ok\xe4nt"] <- "Okant"
+dt$fodelselandgrupp[dt$fodelselandgrupp == "Statsl\xf6s"] <- "Statslos"
+dt$healthcare_region_2019[dt$healthcare_region_2019 == "Sydv\xe4stra"] <- "Sydvastra"
+dt$healthcare_region_2019[dt$healthcare_region_2019 == "Uppsala-\xd6rebro"] <- "Uppsala-Orebro"
+dt$healthcare_region_2019[dt$healthcare_region_2019 == "V\xe4stra"] <- "Vastra"
+dt$healthcare_region_2019[dt$healthcare_region_2019 == "S\xf6dra"] <- "Sodra"
+table(dt$healthcare_region_2019, useNA="ifany")
+table(dt$fodelselandgrupp, useNA="ifany")
+
+
+
+# remove variables (currently) not of interest
+dt <- dt[, -c("lopnr", "c19_o2_index", "c19_h2_index", "c19_i1_index", "c19_c2_index", "fodelseland", "emig_date", "deathdate", "DeSO_2018_2019", "outbefore2020", "inafter2020", "vax_date_1", "vax_date_2", "vax_date_3", "vax_date_4", "cpap_exposure", "pre_sos_lung", "pre_atc_respiratory", "pre_stroke_narrow")]
+colnames(dt)
+
+
+
+# save "cleaned" data
+saveRDS(dt, file = "data/altered/dt--cleaned.rds")
+
+```
+
+## 4. Set correct data type for all columns of interest, and create CRS severity composite variable
+
+```{r}
+
+# load packages
+## data.table: manipulation of data
+library(data.table)
+
+
+
+# load data
+dt <- as.data.table(readRDS("data/altered/dt--cleaned.rds"))
+
+
+
+# check data type for each column of interest, and correct if needed
+#kon + age1jan2020 + education3_2019 + healthcare_region_2019 + pre_asthma + pre_copd + pre_hf + pre_hypertension + pre_ihd + pre_sos_ckd + pre_atc_antidiabetics + pre_stroke + pre_sos_cancer + pre_chronic_liver_d + fodelselandgrupp + employment2_2019 + DispInkKE04_2019
+## exposures
+### CRS, any (specialist care)
+class(dt$crs_broad)
+dt$crs_broad <- as.factor(dt$crs_broad)
+table(dt$crs_broad, useNA="ifany")
+### CRS, ICD-based diagnosis
+class(dt$crs_icd)
+dt$crs_icd <- as.factor(dt$crs_icd)
+table(dt$crs_icd, useNA="ifany")
+### CRS, ICD-based diagnosis, J32
+class(dt$crs_j32)
+dt$crs_j32 <- as.factor(dt$crs_j32)
+table(dt$crs_j32, useNA="ifany")
+### CRS, surgery
+class(dt$crs_kva)
+dt$crs_kva <- as.factor(dt$crs_kva)
+table(dt$crs_kva, useNA="ifany")
+### CRS, any (primary care)
+class(dt$phc_crs_broad)
+##### set NA to 0 in participants that have primary care data (i.e., for those, it shouldn't be NA but 0)
+dt$phc_crs_broad[dt$source %chin% c("VAL", "VEGA") & is.na(dt$phc_crs_broad)] <- 0
+dt$phc_crs_broad <- as.factor(dt$phc_crs_broad)
+table(dt$phc_crs_broad, useNA="ifany")
+### CRS, ICD-based diagnosis (primary care)
+class(dt$phc_crs_icd)
+#### set NA to 0 in participants that have primary care data (i.e., for those, it shouldn't be NA but 0)
+dt$phc_crs_icd[dt$source %chin% c("VAL", "VEGA") & is.na(dt$phc_crs_icd)] <- 0
+dt$phc_crs_icd <- as.factor(dt$phc_crs_icd)
+table(dt$phc_crs_icd, useNA="ifany")
+### CRS, ICD-based diagnosis, J32 (primary care)
+class(dt$phc_crs_j32)
+### set NA to 0 in participants that have primary care data (i.e., for those, it shouldn't be NA but 0)
+dt$phc_crs_j32[dt$source %chin% c("VAL", "VEGA") & is.na(dt$phc_crs_j32)] <- 0
+dt$phc_crs_j32 <- as.factor(dt$phc_crs_j32)
+table(dt$phc_crs_j32, useNA="ifany")
+### CRS, surgery (primary care)
+class(dt$phc_crs_kva)
+#### set NA to 0 in participants that have primary care data (i.e., for those, it shouldn't be NA but 0)
+dt$phc_crs_kva[dt$source %chin% c("VAL", "VEGA") & is.na(dt$phc_crs_kva)] <- 0
+dt$phc_crs_kva <- as.factor(dt$phc_crs_kva)
+table(dt$phc_crs_kva, useNA="ifany")
+## confounders (here, all are listed/handled, but likely some will be omitted due to weakness/uncertainty in relevant causal relations)
+### sex
+class(dt$kon)
+dt$kon <- as.factor(dt$kon)
+table(dt$kon, useNA="ifany")
+### age
+class(dt$age1jan2020)
+dt$age1jan2020 <- as.numeric(dt$age1jan2020)
+summary(dt$age1jan2020)
+### education
+class(dt$education3_2019)
+dt$education3_2019 <- as.factor(dt$education3_2019)
+table(dt$ducation3_2019, useNA="ifany")
+### healthcare region
+class(dt$healthcare_region_2019)
+dt$healthcare_region_2019<- as.factor(dt$healthcare_region_2019)
+table(dt$healthcare_region_2019, useNA="ifany")
+### asthma
+class(dt$pre_asthma)
+dt$pre_asthma <- as.factor(dt$pre_asthma)
+table(dt$pre_asthma, useNA="ifany")
+### COPD
+class(dt$pre_copd)
+dt$pre_copd <- as.factor(dt$pre_copd)
+table(dt$pre_copd, useNA="ifany")
+### heart failure
+class(dt$pre_hf)
+dt$pre_hf <- as.factor(dt$pre_hf)
+table(dt$pre_hf, useNA="ifany")
+### hypertension
+class(dt$pre_hypertension)
+dt$pre_hypertension <- as.factor(dt$pre_hypertension)
+table(dt$pre_hypertension, useNA="ifany")
+### ischemic heart disease
+class(dt$pre_ihd)
+dt$pre_ihd <- as.factor(dt$pre_ihd)
+table(dt$pre_ihd, useNA="ifany")
+### chronic kidney disease
+class(dt$pre_sos_ckd)
+dt$pre_sos_ckd <- as.factor(dt$pre_sos_ckd)
+table(dt$pre_sos_ckd, useNA="ifany")
+### diabetes mellitus
+class(dt$pre_atc_antidiabetics)
+dt$pre_atc_antidiabetics <- as.factor(dt$pre_atc_antidiabetics)
+table(dt$pre_atc_antidiabetics, useNA="ifany")
+### stroke
+class(dt$pre_stroke)
+dt$pre_stroke <- as.factor(dt$pre_stroke)
+table(dt$pre_stroke, useNA="ifany")
+### cancer
+class(dt$pre_sos_cancer)
+dt$pre_sos_cancer <- as.factor(dt$pre_sos_cancer)
+table(dt$pre_sos_cancer, useNA="ifany")
+### chronic liver disease
+class(dt$pre_chronic_liver_d)
+dt$pre_chronic_liver_d <- as.factor(dt$pre_chronic_liver_d)
+table(dt$pre_chronic_liver_d, useNA="ifany")
+### birth country (grouped)
+class(dt$fodelselandgrupp)
+dt$fodelselandgrupp <- as.factor(dt$fodelselandgrupp)
+table(dt$fodelselandgrupp, useNA="ifany")
+### employment status
+class(dt$employment2_2019)
+dt$employment2_2019 <- as.factor(dt$employment2_2019)
+table(dt$employment2_2019, useNA="ifany")
+### disposable income
+class(dt$DispInkKE04_2019)
+dt$DispInkKE04_2019 <- as.numeric(dt$DispInkKE04_2019)
+summary(dt$DispInkKE04_2019)
+
+
+
+# create CRS severity composite variable
+dt$phc_crs_severity <- as.factor(
+  ifelse(
+    dt$source %chin% c("VAL", "VEGA"),
+    ifelse(
+      # no CRS
+      dt$phc_crs_broad == 0 & dt$crs_broad == 0, 0,
+      # Non-surgically treated CRS in primary care
+      ifelse((dt$phc_crs_broad == 1) & (dt$crs_broad == 0 & dt$phc_crs_kva == 0), 1,
+      # Non-surgically treated CRS in specialist care
+      ifelse(dt$crs_broad == 1 & (dt$phc_crs_kva == 0 & dt$crs_kva == 0), 2,
+      # Surgically treated CRS
+      ifelse(dt$phc_crs_kva == 1 | dt$crs_kva == 1, 3,
+      NA
+    )))),
+    NA
+  )
+)
+table(dt$phc_crs_severity, useNA="ifany")
+
+
+
+# save "formatted" data
+saveRDS(dt, file = "data/altered/dt--formatted.rds")
+
+```
+
+## 5. Pre-analysis descriptive statistics
+
+```{r}
+
+# load packages
+## data.table: manipulation of data
+library(data.table)
+## gtsummary, flextable: descriptive tables (including export thereof)
+library(gtsummary)
+library(flextable)
+## summarytools: crosstab
+library(summarytools)
+## VennDiagram: Venn diagrams for visualizing overlap between different CRS definitions
+library(VennDiagram)
+
+
+
+# load data
+dt <- as.data.table(readRDS("data/altered/dt--formatted.rds"))
+
+# make a dt for those with primary care data
+dt_primary_care <- dt[dt$source %chin% c("VAL", "VEGA"), ]
+
+
+
+# print the proportion with crs_broad in each of the healthcare regions
+print(summarytools::ctable(
+  x = dt$healthcare_region_2019,
+  y = dt$crs_broad,
+  prop = "r"
+))
+
+
+
+# number of participants with CRS surgery in the full study sample
+nrow(dt[crs_kva == 1, ])
+
+
+
+# cross-tab for primary care-diagnosed and specialist care-diagnosed CRS, among those with primary care data
+summarytools::ctable(
+  y = dt_primary_care$crs_broad,
+  x = dt_primary_care$phc_crs_broad,
+)
+
+# number of participants with primary care-diagnosed CRS, specialist care-diagnosed CRS, and surgically treated CRS
+nrow(dt_primary_care[phc_crs_broad == 1, ])
+nrow(dt_primary_care[crs_broad == 1, ])
+nrow(dt_primary_care[crs_kva == 1 | phc_crs_kva == 1, ])
+
+
+
+# Venn diagram for overlap between CRS definitions
+dt_primary_care[, id := .I]
+surgery <- dt_primary_care[crs_kva == 1 | phc_crs_kva == 1, id]
+primary <- dt_primary_care[phc_crs_broad == 1, id]
+specialist <- dt_primary_care[crs_broad == 1, id]
+
+venn.plot <- venn.diagram(
+  x = list(
+    CRS_KVA = surgery,
+    PHC_CRS_BROAD = primary,
+    CRS_BROAD = specialist
+  ),
+  filename = NULL,
+  fill = c("#d35252", "#fc9432", "#fe7070"),
+  alpha = 0.5,
+  cex = 1.5,
+  cat.cex = 1.2,
+  cat.pos = 0
+)
+
+svg("venn.svg")
+grid.draw(venn.plot)
+plot(venn.plot)
+dev.off()
+
+
+
+
+# produce descriptive tables
+## "overall" cohort (i.e., with CRS based on specialist data, available for "everyone")
+dt |>
+  gtsummary::tbl_summary(
+    by = crs_broad,
+    statistic = all_continuous() ~ "{mean} ({sd})"
+  ) |>
+  #gtsummary::add_overall() |>
+  gtsummary::as_flex_table() |>
+  flextable::fontsize(size = 9) |>
+  flextable::save_as_docx(
+    path="output/characteristics--crs_broad.docx",
+    pr_section = officer::prop_section(
+      page_size = officer::page_size(orient = "landscape")
+    )
+  )
+## "subcohort" with CRS severity, available for those with primary care data (i.e., VAL and VEGA)
+dt[dt$source %chin% c("VAL", "VEGA"), ] |>
+  gtsummary::tbl_summary(
+    by = phc_crs_severity,
+    statistic = all_continuous() ~ "{mean} ({sd})"
+  ) |>
+  #gtsummary::add_overall() |>
+  gtsummary::as_flex_table() |>
+  flextable::fontsize(size = 9) |>
+  flextable::save_as_docx(
+    path="output/characteristics--phc_crs_broad.docx",
+    pr_section = officer::prop_section(
+      page_size = officer::page_size(orient = "landscape")
+    )
+  )
+
+```
+
+## 6. Regression analyses
+
+```{r}
+
+# load packages
+## data.table: manipulation of data
+library(data.table)
+## nnet: multinomial regression
+library(nnet)
+## broom: tidy up regression output
+library(broom)
+## officer, flextable: descriptive tables (including export thereof)
+library(officer)
+library(flextable)
+## summarytools: crosstab
+library(summarytools)
+
+
+
+# load data
+dt <- as.data.table(readRDS("data/altered/dt--formatted.rds"))
+
+
+
+# function to perform multinomial logistic regression
+multinomial_regression_func <- function(dt, exposure) {
+  # print the number of cases of the outcome across exposure values
+  print('table exposure')
+  print(table(dt[[exposure]], useNA="ifany"))
+  print('table covid_severity')
+  print(table(dt$covid_severity, useNA="ifany"))
+  print(summarytools::ctable(
+    y = dt[[exposure]],
+    x = dt$covid_severity
+  ))
+  #continue(TRUE)
+  # fit a multinomial regression model
+  ## full confounder list:
+  ## #kon + age1jan2020 + education3_2019 + healthcare_region_2019 + pre_asthma + pre_copd + pre_hf + pre_hypertension + pre_ihd + pre_sos_ckd + pre_atc_antidiabetics + pre_stroke + pre_sos_cancer + pre_chronic_liver_d + fodelselandgrupp + employment2_2019 + DispInkKE04_2019'
+  formula_str <- as.formula(paste(
+    "covid_severity ~",
+    exposure,
+    "+ kon + age1jan2020 + 
+    education3_2019 + 
+    healthcare_region_2019 +
+    pre_asthma + pre_copd + pre_hf + pre_hypertension + pre_ihd + pre_sos_ckd + pre_atc_antidiabetics"
+  ))
+  multinomial_model <<- nnet::multinom(
+    formula_str,
+    data = dt,
+    maxit=500,
+    trace=TRUE,
+    Hess=TRUE
+    #abstol=1e-4,
+    #reltol=1e-5
+  )
+  print(summary(multinomial_model))
+  
+  # process the output
+  ## get the data out
+  dt_results <<- as.data.table(tidy(multinomial_model, conf.int = TRUE))
+  print(dt_results)
+  #return(TRUE)
+  ## exponentiate the estimates and confidence intervals to get odds ratios and their confidence intervals
+  dt_results[, `:=`(
+    estimate = exp(estimate),
+    conf.low = exp(conf.low),
+    conf.high = exp(conf.high)
+  )]
+  ## round the estimates, confidence intervals, and p-values, and create a new variable with the estimate and confidence interval in the format "estimate (conf.low–conf.high
+  dt_results[, `:=`(
+    estimate = round(estimate, 2),
+    conf.low = round(conf.low, 2),
+    conf.high = round(conf.high, 2),
+    p.value = round(p.value, 3),
+    estimate_ci = sprintf("%.2f (%.2f–%.2f)", estimate, conf.low, conf.high)
+  )]
+  ## finally, select only the variables of interest and rename them for presentation
+  dt_results <- dt_results[, .(
+    Outcome = y.level,
+    Variable = term,
+    `COR (95% CI)` = estimate_ci,
+    `p-value` = p.value
+  )]
+  print(dt_results)
+  
+  # save the results
+  ## create a flextable, and make sure the font size is small enough to fit the table on the page
+  ft <- flextable(dt_results) |>
+    flextable::fontsize(size = 9) |>
+    flextable::autofit()
+    ## create a section with landscape orientation for the table
+    landscape_section <- block_section(
+      prop_section(
+        page_size = page_size(orient = "landscape"),
+        type = "continuous"
+      )
+    )
+  ## create a Word document, add the table to it, and set the section to landscape orientation
+  doc <- read_docx()
+  doc <- body_add_flextable(doc, ft)
+  doc <- body_end_block_section(doc, value = landscape_section)
+  ## save the document
+  print(doc, target = paste0("output/regression-results--", exposure, ".docx"))
+}
+
+# run multinomial regression on...
+## CRS as diagnosed in specialist care (full )
+multinomial_regression_func(dt, "crs_broad")
+## CRS as diagnosed in specialist or primary care, with KVA code (re-coded as phc_crs_severity, see above)
+multinomial_regression_func(dt[dt$source %chin% c("VAL", "VEGA"), ], "phc_crs_severity")
+## CRS as diagnosed in primary care
+multinomial_regression_func(dt[dt$source %chin% c("VAL", "VEGA"), ], "phc_crs_broad")
+
+```
+
+
+## 7. Forest plots
+
+```{r}
+
+# data.table: data manipulation
+library(data.table)
+# forestplot: forest plot
+library(forestplot)
+# grImport2, grid, gridExtra: combine plots vertically
+library(grImport2)
+library(grid)
+library(gridExtra)
+
+
+
+# data.tables with information needed for the forest plots
+out_crs_broad <- data.table(
+  "outcome" = c("Mild COVID-19", "COVID-19 with hospitalization", "COVID-19 with ICU care", "Death due to COVID-19"),
+  "n_cases" = c("23,539/1,922,559", "2,338/126,441", "143/6,705", "329/25,148"),
+  "cor_95ci" = c("1.18 (1.16-1.20)", "1.28 (1.23-1.34)", "1.54 (1.30-1.82)", "1.00 (0.89-1.11)")
+)
+out_phc_crs_broad <- data.table(
+  "outcome" = c("Mild COVID-19", "COVID-19 with hospitalization", "COVID-19 with ICU care", "Death due to COVID-19"),
+  "n_cases" = c("21,086/869,335", "1,921/61,347", "109/3,250", "272/11,327"),
+  "cor_95ci" = c("1.13 (1.11-1.15)", "1.17 (1.12-1.23)", "1.33 (1.10-1.61)", "0.89 (0.79-1.01)")
+)
+out_phc_crs_severity_1 <- data.table(
+  "outcome" = c("Mild COVID-19", "Non-surgically treated CRS in primary care", "Non-surgically treated CRS in specialist care", "Surgically treated CRS"),
+  "n_cases" = c("1", "10,053/869,335", "9,888/869,335", "4,026/869,335"),
+  "cor_95ci" = c("1 (1-1)", "1.08 (1.06-1.11)", "1.15 (1.12-1.18)", "1.20 (1.16-1.25)")
+)
+out_phc_crs_severity_2 <- data.table(
+  "outcome" = c("COVID-19 with hospitalization", "Non-surgically treated CRS in primary care", "Non-surgically treated CRS in specialist care", "Surgically treated CRS"),
+  "n_cases" = c("1", "787/61,347", "1,074/61,347", "340/61,347"),
+  "cor_95ci" = c("1 (1-1)", "1.12 (1.04-1.20)", "1.20 (1.13-1.28)", "1.36 (1.22-1.52)")
+)
+out_phc_crs_severity_3 <- data.table(
+  "outcome" = c("COVID-19 with ICU care", "Non-surgically treated CRS in primary care", "Non-surgically treated CRS in specialist care", "Surgically treated CRS"),
+  "n_cases" = c("1", "43/3,250", "62/3,250", "21/3,250"),
+  "cor_95ci" = c("1 (1-1)", "1.18 (0.87-1.60)", "1.45 (1.13-1.87)", "1.38 (0.89-2.12)")
+)
+out_phc_crs_severity_4 <- data.table(
+  "outcome" = c("Death due to COVID-19", "Non-surgically treated CRS in primary care", "Non-surgically treated CRS in specialist care", "Surgically treated CRS"),
+  "n_cases" = c("1", "130/11,327", "143/11,327", "34/11,327"),
+  "cor_95ci" = c("1 (1-1)", "0.87 (0.73-1.04)", "0.89 (0.75-1.05)", "1.06 (0.75-1.49)")
+)
+
+
+forest_plot_func <- function(plotting_data, filename) {
+  # extract cor and the lower/upper 95%CI limits from cor_95ci (syntax: COR (95ci_lower-95ci_upper))
+  plotting_data$cor <- as.numeric(sub("^(.*) \\(.*\\)$", "\\1", plotting_data$cor_95ci))
+  plotting_data$lower_95ci <- as.numeric(sub(".*\\((.*)-(.*)\\).*", "\\1", plotting_data$cor_95ci))
+  plotting_data$upper_95ci <- as.numeric(sub(".*\\((.*)-(.*)\\).*", "\\2", plotting_data$cor_95ci))
+  
+  print(plotting_data)
+  
+  est_1 <- plotting_data[1, ]$cor
+  lower_1 <- plotting_data[1, ]$lower_95ci
+  upper_1 <- plotting_data[1, ]$upper_95ci
+  
+  est_2 <- plotting_data[2, ]$cor
+  lower_2 <- plotting_data[2, ]$lower_95ci
+  upper_2 <- plotting_data[2, ]$upper_95ci
+  
+  est_3 <- plotting_data[3, ]$cor
+  lower_3 <- plotting_data[3, ]$lower_95ci
+  upper_3 <- plotting_data[3, ]$upper_95ci
+  
+  est_4 <- plotting_data[4, ]$cor
+  lower_4 <- plotting_data[4, ]$lower_95ci
+  upper_4 <- plotting_data[4, ]$upper_95ci
+
+  tabletext <- cbind(
+    c("Outcome", plotting_data$outcome), # set to "Exposure/outcome" for the "mega plot"
+    c("Cases", plotting_data$n_cases),
+    c("COR (95%CI)",
+      paste0(est_1, " (", lower_1, " to ", upper_1, ")"),
+      paste0(est_2, " (", lower_2, " to ", upper_2, ")"),
+      paste0(est_3, " (", lower_3, " to ", upper_3, ")"),
+      paste0(est_4, " (", lower_4, " to ", upper_4, ")")
+    )
+  )
+  print(tabletext)
+  print(dim(tabletext))
+  #return(TRUE)
+  
+  # numeric data for forestplot
+  mean  <- c(NA, est_1, est_2, est_3, est_4)
+  lower <- c(NA, lower_1, lower_2, lower_3, lower_4)
+  upper <- c(NA, upper_1, upper_2, upper_3, upper_4)
+  
+  # non-surgically treated CRS in primary care: #fc9432
+  # non-surgically treated CRS in specialist care: #fe7070
+  # surgically treated CRS: #d35252
+  color = "#777" # not really the right color but easier to fix in Inkscape post-hoc this way....
+  
+  print(mean)
+  print(lower)
+  print(upper)
+
+  svg(paste0('forest-plot--', filename, '.svg'), width=15.3, height=3.2)
+  print(forestplot(
+    labeltext = tabletext,
+    mean = mean,
+    lower = lower,
+    upper = upper,
+    zero = 1,
+    xlog = TRUE,
+    clip = c(0.7, 2.3),
+    xticks = c(0.7, 1, 2.3),
+    boxsize = 0.3,
+    col = fpColors(box = color, line = color, summary = color, zero = "#000"),
+    lwd.ci = 4,
+    lwd.zero = 0.73,
+    ci.vertices = TRUE,
+    ci.vertices.height = 0.03,
+    txt_gp = fpTxtGp(
+      ticks = gpar(cex = 1.3),
+      xlab = gpar(cex = 1),
+      label = gpar(cex = 1.4)
+    )
+  ))
+  dev.off()
+}
+
+# call the function to make forest plots
+forest_plot_func(out_crs_broad, "crs_broad")
+forest_plot_func(out_phc_crs_broad, "phc_crs_broad")
+forest_plot_func(out_phc_crs_severity_1, "phc_crs_severity_1")
+forest_plot_func(out_phc_crs_severity_2, "phc_crs_severity_2")
+forest_plot_func(out_phc_crs_severity_3, "phc_crs_severity_3")
+forest_plot_func(out_phc_crs_severity_4, "phc_crs_severity_4")
+
+
+
+# combine the CRS severity plots vertically into one
+files <- c("forest-plot--phc_crs_severity_1.svg", "forest-plot--phc_crs_severity_2.svg", "forest-plot--phc_crs_severity_3.svg", "forest-plot--phc_crs_severity_4.svg")
+
+grobs <- lapply(files, function(f) {
+  doc <- readPicture(f)
+  pictureGrob(doc)
+})
+
+combined <- do.call(arrangeGrob, c(grobs, ncol = 1))
+combined
+
+svg("forest-plot--phc-crs-severity--combined.svg", width = 8, height = 12)
+grid.draw(combined)
+dev.off()
+
+```
